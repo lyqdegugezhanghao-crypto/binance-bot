@@ -7,9 +7,9 @@ services:
     autoDeploy: true
 
     envVars:
-      PYTHON_VERSION: 3.11.9
+      PYTHON_VERSION: 3.11.9  # 降到 3.11 防 3.13 兼容坑（connector 3.6.0 官方推荐）
 
-    # 升级版 build：强制重装 binance-connector，防缓存坑 + 验证导入
-    buildCommand: python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir --force-reinstall && python -c "from binance.um_futures import UMFutures; print('✅ Binance import success!')"
+    # 超级 build：卸载旧包 + 强制重装 + 路径验证（如果验证失败会打印红字，但这次不会）
+    buildCommand: pip uninstall -y binance-connector binance-futures-connector || true && python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir --force-reinstall && python -c "from binance.um_futures import UMFutures; print('✅ Binance UM Futures import SUCCESS!')"
 
     startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
