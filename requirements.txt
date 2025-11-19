@@ -1,0 +1,1 @@
+binance-connector==3.6.0
