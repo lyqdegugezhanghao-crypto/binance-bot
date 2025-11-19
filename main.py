@@ -25,10 +25,10 @@ async def get_price():
     return float(client.mark_price(SYMBOL)["markPrice"])
 
 async def get_positions():
-    return client.futures_position_information(symbol=SYMBOL)
+    return client.get_position_risk(symbol=SYMBOL)
 
 def print_positions():
-    positions = client.futures_position_information(symbol=SYMBOL)
+    positions = client.get_position_risk(symbol=SYMBOL)
     for p in positions:
         amt = float(p["positionAmt"])
         if abs(amt) > 0.001:
@@ -36,7 +36,7 @@ def print_positions():
 
 async def open(side, usd, price, pos_side):
     # 开仓前检查是否已持仓（防叠仓）
-    positions = await get_positions()
+    positions = client.get_position_risk(symbol=SYMBOL)
     for p in positions:
         if p["positionSide"] == pos_side and float(p["positionAmt"]) != 0:
             log(f"警告：{pos_side} 已持仓 {float(p['positionAmt']):.2f}，跳过开仓")
@@ -56,13 +56,13 @@ async def open(side, usd, price, pos_side):
         log(f"开仓失败 → {e}")
     return False
 
-# 终极修复：用 reduceOnly + 手动反向平仓
+# 终极修复：用 get_position_risk + reduceOnly
 async def close_all():
     log("开始强平：打印当前持仓")
     print_positions()  # 平前打印
 
     try:
-        positions = client.futures_position_information(symbol=SYMBOL)
+        positions = client.get_position_risk(symbol=SYMBOL)
         for p in positions:
             amt = float(p["positionAmt"])
             if abs(amt) < 0.01: continue
@@ -155,4 +155,4 @@ async def root():
     except: p = 0
     return {"状态": state["current_state"], "价格": p, "C点": state["initial_entry_price"]}
 
-log("2025 终极防叠仓版已启动（reduceOnly + 持仓验证）")
+log("2025 终极防叠仓版已启动（get_position_risk + reduceOnly）")
