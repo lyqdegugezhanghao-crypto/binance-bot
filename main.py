@@ -1,12 +1,22 @@
 import os
 from fastapi import FastAPI
-from binance import UMFutures   # ← 2024-2025 最新正确导入方式
+
+# 官方 3.6.0 导入路径（已验证）
+try:
+    from binance.um_futures import UMFutures
+    print("✅ Binance UM Futures imported successfully")
+except ImportError as e:
+    print(f"❌ Import error: {e}")
+    UMFutures = None  # 备用
 
 app = FastAPI(title="Binance USDC Balance Checker")
 
 @app.get("/")
 @app.get("/balance")
 async def get_usdc_balance():
+    if UMFutures is None:
+        return {"error": "Binance 库导入失败，请检查 requirements.txt"}
+
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_SECRET")
 
@@ -16,15 +26,16 @@ async def get_usdc_balance():
     client = UMFutures(key=api_key, secret=api_secret)
 
     try:
-        balances = client.balance()
-        for item in balances:
+        balance_list = client.balance()
+        for item in balance_list:
             if item.get("asset") == "USDC":
                 return {
                     "status": "success",
-                    "USDC 总余额": item["balance"],
-                    "USDC 可用余额": item["availableBalance"],
+                    "asset": "USDC",
+                    "总余额": item["balance"],
+                    "可用余额": item["availableBalance"],
                     "可提现余额": item.get("withdrawAvailable", "N/A"),
-                    "更新时间": item["updateTime"]
+                    "更新时间": item.get("updateTime", "N/A")
                 }
         return {"status": "warning", "message": "账户中未找到 USDC"}
     
