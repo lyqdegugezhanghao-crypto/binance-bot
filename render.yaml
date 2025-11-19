@@ -7,9 +7,9 @@ services:
     autoDeploy: true
 
     envVars:
-      PYTHON_VERSION: 3.11.9  # 固定 3.11，防 3.13 兼容问题
+      PYTHON_VERSION: 3.11.9  # 固定 3.11，兼容性最佳
 
-    # 核弹级 build：卸载旧包 + 安装期货包 + 验证导入
-    buildCommand: pip uninstall -y binance-connector binance-futures-connector || true && python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir --force-reinstall && python -c "from binance.um_futures import UMFutures; print('✅ Binance Futures import SUCCESS!')"
+    # 修复 pip 升级通知 + 强制安装 + 验证（这次会打印成功）
+    buildCommand: python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir --force-reinstall && python -c "from binance.um_futures import UMFutures; print('✅ Binance Futures import SUCCESS!')"
 
     startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
