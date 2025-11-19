@@ -61,12 +61,13 @@ async def close_all_market():
             if qty < STEP_SIZE:
                 continue
             side = "SELL" if float(pos["positionAmt"]) > 0 else "BUY"
-            client.futures_create_order(
-                symbol=SYMBOL,
-                side=side,
-                type="MARKET",
-                quantity=qty
-            )
+            params = {
+                "symbol": SYMBOL,
+                "side": side,
+                "type": "MARKET",
+                "quantity": qty
+            }
+            client.new_order(**params)  # 官方方法
             log(f"市价全平 | {side} | 数量: {qty}")
     except Exception as e:
         log(f"全平异常: {e}")
@@ -80,22 +81,24 @@ async def open_order(side: str, usd_amount: float, price: float):
 
         # 优先限价IOC，失败则市价
         try:
-            client.futures_create_order(
-                symbol=SYMBOL,
-                side=side,
-                type="LIMIT",
-                quantity=qty,
-                price=round(price, 1),
-                timeInForce="IOC"
-            )
+            params = {
+                "symbol": SYMBOL,
+                "side": side,
+                "type": "LIMIT",
+                "quantity": qty,
+                "price": round(price, 1),
+                "timeInForce": "IOC"
+            }
+            client.new_order(**params)  # 官方方法
             log(f"限价开仓成功 | {side} | 数量: {qty} | 价格: {price:.2f}")
-        except:
-            client.futures_create_order(
-                symbol=SYMBOL,
-                side=side,
-                type="MARKET",
-                quantity=qty
-            )
+        except Exception as e:
+            params = {
+                "symbol": SYMBOL,
+                "side": side,
+                "type": "MARKET",
+                "quantity": qty
+            }
+            client.new_order(**params)  # 市价补单
             log(f"限价失败→市价补单 | {side} | 数量: {qty}")
     except Exception as e:
         log(f"开仓异常: {e}")
