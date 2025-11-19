@@ -9,6 +9,7 @@ services:
     envVars:
       PYTHON_VERSION: 3.11.9
 
-    buildCommand: python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir
+    # 升级版 build：强制重装 binance-connector，防缓存坑 + 验证导入
+    buildCommand: python -m pip install --upgrade pip && pip install -r requirements.txt --no-cache-dir --force-reinstall && python -c "from binance.um_futures import UMFutures; print('✅ Binance import success!')"
 
     startCommand: python -m uvicorn main:app --host 0.0.0.0 --port $PORT
