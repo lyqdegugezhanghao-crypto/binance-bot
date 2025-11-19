@@ -13,16 +13,16 @@ API_SECRET = os.getenv("BINANCE_SECRET")
 
 SYMBOL = "SOLUSDC"          # 交易对
 LEVERAGE = 3                # 杠杆
-FIXED_GRID = 1.0            # 固定 1 美元网格
-TIME_STOP = 600             # 10 分钟时间止损
+FIXED_GRID = 1.0            # 固定 1 美元网格（A-B-C-D-E 每点相差 1 美元）
+TIME_STOP = 600             # 10 分钟硬止损
 
-# 美元仓位
+# 美元名义仓位
 SIZE_MAIN   = 15    # C点开多
 SIZE_HEDGE1 = 30    # D点加空对冲
 SIZE_HEDGE2 = 55    # 回到C点加多翻倍
 # ===========================================================
 
-app = FastAPI(title="SOL 三角对冲实盘版 - 1美元网格 + 真实10分钟硬止损")
+app = FastAPI(title="SOL 三角对冲实盘版 - 1美元网格 + 真实10分钟止损")
 
 client = UMFutures(key=API_KEY, secret=API_SECRET, base_url="https://fapi.binance.com")
 
@@ -54,7 +54,7 @@ def adjust_qty(qty):
     qty = (int(qty / STEP_SIZE)) * STEP_SIZE
     return round(qty, QUANTITY_PRECISION)
 
-# 开仓（必须带 positionSide！）
+# 开仓（必须带 positionSide）
 async def open_order(side: str, usd_amount: float, price: float, position_side: str):
     try:
         raw_qty = (usd_amount * LEVERAGE) / price
@@ -63,7 +63,7 @@ async def open_order(side: str, usd_amount: float, price: float, position_side: 
             log(f"开仓失败：数量取整后为0（原始{raw_qty:.5f}）")
             return
 
-        # 获取价格精度 tickSize
+        # 价格精度
         tick_size = 0.01
         try:
             info = client.exchange_info()["symbols"]
@@ -77,12 +77,12 @@ async def open_order(side: str, usd_amount: float, price: float, position_side: 
             pass
         price_rounded = round((price // tick_size) * tick_size, 8)
 
+        # 关键参数
         common_params = {
-            = {
             "symbol": SYMBOL,
             "side": side,
             "quantity": qty,
-            "positionSide": position_side           # 关键！双向模式必须加
+            "positionSide": position_side          # 必须加！
         }
 
         # 优先限价IOC
@@ -122,7 +122,7 @@ async def close_all_market():
     except Exception as e:
         log(f"全平异常: {e}")
 
-# ========================== 核心策略循环 ==========================
+# ========================== 核心循环 ==========================
 async def strategy_loop():
     await asyncio.sleep(8)
     log("SOL 三角对冲实盘启动成功！1美元固定网格 + 真实10分钟止损已就位！")
@@ -131,7 +131,7 @@ async def strategy_loop():
         try:
             price = await get_last_price()
 
-            # 真实10分钟时间止损（从第一次建仓开始计时）
+            # 真实10分钟时间止损
             if state["initial_entry_time"] and (time.time() - state["initial_entry_time"] > TIME_STOP):
                 log("触发10分钟硬止损 → 强平所有仓位！")
                 await close_all_market()
@@ -143,20 +143,20 @@ async def strategy_loop():
                 await asyncio.sleep(10)
                 continue
 
-            # ==================== 状态机 ====================
+            # 状态机
             if state["current_state"] == "IDLE":
                 log(f"C点开多 | 价格 {price:.3f}")
                 await open_order("BUY", SIZE_MAIN, price, "LONG")
                 state.update({
                     "current_state": "LONG",
                     "initial_entry_price": price,
-                    "initial_entry_time": time.time()          # 只记录一次！
+                    "initial_entry_time": time.time()
                 })
 
             elif state["current_state"] == "LONG":
                 C = state["initial_entry_price"]
-                B = C + FIXED_GRID      # +1
-                D = C - FIXED_GRID      # -1
+                B = C + FIXED_GRID
+                D = C - FIXED_GRID
 
                 if price >= B:
                     log(f"到达B点(+1) → 多单止盈，全平")
@@ -169,48 +169,46 @@ async def strategy_loop():
 
             elif state["current_state"] == "HEDGE1":
                 C = state["initial_entry_price"]
-                E = C - 2 * FIXED_GRID  # -2
+                E = C - 2 * FIXED_GRID
 
                 if price <= E:
-                    log(f"到达E点(-2) → 空单止盈，全平结束")
+                    log(f"到达E点(-2) → 空单止盈，全平")
                     await close_all_market()
                     state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
                 elif price >= C:
-                    log(f"价格回到C点 → 加多翻倍！")
+                    log(f"回到C点 → 加多翻倍！")
                     await open_order("BUY", SIZE_HEDGE2, price, "LONG")
                     state["current_state"] = "HEDGE2"
 
             elif state["current_state"] == "HEDGE2":
                 C = state["initial_entry_price"]
-                B = C + FIXED_GRID      # +1
-
+                B = C + FIXED_GRID
                 if price >= B:
                     log(f"回升到B点(+1) → 大胜全平！")
                     await close_all_market()
                     state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
 
-            # 运行状态日志
             elapsed = int(time.time() - (state["initial_entry_time"] or time.time()))
-            log(f"状态:{state['current_state']:7}  价格:{price:8.3f}  距C:{price-state['initial_entry_price']:+6.3f}  已运行:{elapsed:3d}s")
+            log(f"状态:{state['current_state']:7}  价格:{price:8.3f}  距C:{price - state['initial_entry_price'] if state['initial_entry_price'] else 0:+7.3f}  已运行:{elapsed:3d}s")
 
         except Exception as e:
             log(f"策略异常: {e}")
 
         await asyncio.sleep(11)
 
-# ========================== 启动时初始化 ==========================
+# ========================== 启动初始化 ==========================
 @app.on_event("startup")
 async def startup_event():
     global STEP_SIZE, QUANTITY_PRECISION
 
-    # 1. 强制开启对冲模式（保险起见）
+    # 确保是对冲模式
     try:
         client.futures_change_position_mode(dualSidePosition=True)
         log("已确认/切换为双向持仓模式")
     except:
-        log("双向模式设置已存在")
+        log("双向模式已存在")
 
-    # 2. 获取合约精度
+    # 获取数量精度
     try:
         info = client.exchange_info()
         for s in info["symbols"]:
@@ -219,18 +217,18 @@ async def startup_event():
                     if f["filterType"] == "LOT_SIZE":
                         STEP_SIZE = float(f["stepSize"])
                         QUANTITY_PRECISION = int(round(-math.log10(STEP_SIZE)))
-                        log(f"精度初始化成功 → stepSize={STEP_SIZE}，数量保留 {QUANTITY_PRECISION} 位")
+                        log(f"精度初始化成功 stepSize={STEP_SIZE} 精度{QUANTITY_PRECISION}位")
                         break
                 break
         if STEP_SIZE is None:
             raise Exception("未获取到stepSize")
     except Exception as e:
-        log(f"获取精度失败: {e} → 机器人停止")
+        log(f"获取精度失败: {e} → 机器人停止运行")
         return
 
     asyncio.create_task(strategy_loop())
 
-# ========================== HTTP监控接口 ==========================
+# ========================== HTTP监控 ==========================
 @app.get("/")
 async def root():
     try:
@@ -240,13 +238,13 @@ async def root():
     elapsed = int(time.time() - (state["initial_entry_time"] or time.time())) if state["initial_entry_time"] else 0
     remain = max(0, TIME_STOP - elapsed)
     return {
-        "msg": "SOL 1美元三角对冲实盘机器人运行中",
+        "msg": "SOL 1美元三角对冲机器人运行中",
         "状态": state["current_state"],
         "当前价": round(price, 3),
         "C点价": round(state["initial_entry_price"], 3) if state["initial_entry_price"] else None,
         "距C点": round(price - (state["initial_entry_price"] or price), 3),
         "已运行秒": elapsed,
-        "距时间止损": f"{remain}s ({remain//60}分{remain%60}秒)"
+        "距止损还剩": f"{remain}s"
     }
 
 log("策略加载完成，等待启动...")
