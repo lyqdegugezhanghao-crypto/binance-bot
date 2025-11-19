@@ -1,7 +1,4 @@
-import os
-import asyncio
-import time
-import math
+import os, asyncio, time, math
 from fastapi import FastAPI
 from binance.um_futures import UMFutures
 from datetime import datetime
@@ -10,201 +7,142 @@ from datetime import datetime
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_SECRET")
 
-SYMBOL = "SOLUSDC"          # 改成 SOLUSDT 也完美支持
+SYMBOL = "SOLUSDC"          # 改 SOLUSDT 也行
 LEVERAGE = 3
-FIXED_GRID = 1.0            # 固定 1 美元网格
-TIME_STOP = 600             # 10 分钟真实时间止损
+FIXED_GRID = 1.0
+TIME_STOP = 600             # 10分钟
 
-SIZE_MAIN   = 15    # C点开多（美元）
-SIZE_HEDGE1 = 30    # D点开空对冲
-SIZE_HEDGE2 = 55    # 回到C点加多翻倍
+SIZE_MAIN   = 15
+SIZE_HEDGE1 = 30
+SIZE_HEDGE2 = 55
 # ===========================================================
 
 app = FastAPI()
 client = UMFutures(key=API_KEY, secret=API_SECRET, base_url="https://fapi.binance.com")
 
 STEP_SIZE = None
-state = {
-    "current_state": "IDLE",
-    "initial_entry_price": None,
-    "initial_entry_time": None,
-}
+state = {"current_state":"IDLE", "initial_entry_price":None, "initial_entry_time":None}
 
-def log(msg):
-    print(f"[{datetime.now():%H:%M:%S}] {msg}")
+def log(m): print(f"[{datetime.now():%H:%M:%S}] {m}")
 
-async def get_last_price():
+async def get_price():
     return float(client.mark_price(SYMBOL)["markPrice"])
 
-def adjust_qty(qty):
+def qty_ok(q):
     global STEP_SIZE
-    if STEP_SIZE is None or qty < STEP_SIZE:
-        return 0
-    return round((int(qty / STEP_SIZE)) * STEP_SIZE, 8)
+    if q < STEP_SIZE: return 0
+    return round((int(q / STEP_SIZE)) * STEP_SIZE, 8)
 
-async def open_order(side: str, usd_amount: float, price: float, position_side: str) -> bool:
-    qty = adjust_qty(usd_amount * LEVERAGE / price)
-    if qty <= 0:
-        log("数量太小，无法下单")
+async def open(side, usd, price, pos_side):
+    q = qty_ok(usd * LEVERAGE / price)
+    if q == 0:
+        log("数量太小，放弃下单")
         return False
-
-    params = {
-        "symbol": SYMBOL,
-        "side": side,
-        "quantity": qty,
-        "positionSide": position_side
-    }
-
+    params = {"symbol":SYMBOL, "side":side, "quantity":q, "positionSide":pos_side}
     try:
-        # 优先限价IOC
-        resp = client.new_order(
-            **params,
-            type="LIMIT",
-            price=round(price // 0.01 * 0.01, 8),
-            timeInForce="IOC"
-        )
-        if resp.get("orderId"):
-            log(f"开仓成功 → {position_side} | {side} {qty} @ 限价")
+        r = client.new_order(**params, type="MARKET")
+        if r.get("orderId"):
+            log(f"开仓成功 → {pos_side} | {side} {q} 手")
             return True
-    except:
-        pass
-
-    # 市价补单
-    try:
-        resp = client.new_order(**params, type="MARKET")
-        if resp.get("orderId"):
-            log(f"开仓成功 → {position_side} | {side} {qty} @ 市价")
-            return True
-        else:
-            log(f"下单被拒 → {resp.get('msg', '未知错误')}")
     except Exception as e:
-        log(f"下单异常 → {e}")
-
+        log(f"开仓失败 → {e}")
     return False
 
-async def close_all_market():
+# ==================== 彻底修复版强平函数 ====================
+async def close_all():
     try:
-        positions = client.futures_position_information(symbol=SYMBOL)
+        positions = client.position_information(symbol=SYMBOL)   # 正确函数名
         for p in positions:
             amt = float(p["positionAmt"])
-            qty = abs(amt)
-            if qty < 0.009:
-                continue
+            if abs(amt) < 0.01: continue
             side = "SELL" if amt > 0 else "BUY"
             client.new_order(
                 symbol=SYMBOL,
                 side=side,
                 type="MARKET",
-                quantity=qty,
+                quantity=abs(amt),
                 positionSide=p["positionSide"]
             )
-            log(f"强平 → {p['positionSide']} {qty}")
+            log(f"强平成功 → {p['positionSide']} {abs(amt):.2f} 手")
     except Exception as e:
-        log(f"强平异常 → {e}")
+        log(f"强平失败 → {e}")
 
-# ========================== 核心循环（已彻底解决重复开仓 + 时间止损） ==========================
+# ========================== 主循环 ==========================
 async def strategy_loop():
-    await asyncio.sleep(1)
-
-    # 初始化精度 + 双向模式
+    await asyncio.sleep(2)
     global STEP_SIZE
     try:
-        info = client.exchange_info()
-        for s in info["symbols"]:
+        for s in client.exchange_info()["symbols"]:
             if s["symbol"] == SYMBOL:
-                for f in s["filters"]:
-                    if f["filterType"] == "LOT_SIZE":
-                        STEP_SIZE = float(f["stepSize"])
-                break
-        log(f"精度初始化成功 stepSize={STEP_SIZE}")
-
-        # 正确切换双向模式
+                STEP_SIZE = float([f["stepSize"] for f in s["filters"] if f["filterType"]=="LOT_SIZE"][0])
         client.change_position_mode(dualSidePosition=True)
-        log("已确认双向持仓模式")
-    except Exception as e:
-        log(f"初始化异常 → {e}")
-
-    log("SOL 三角对冲实盘版启动！1美元网格 + 真10分钟止损")
+        log("初始化完成，步长 {STEP_SIZE}，已双向模式")
+    except Exception as e: log(f"初始化异常 {e}")
 
     while True:
         try:
-            price = await get_last_price()
+            price = await get_price()
 
-            # 真实时间止损（从第一仓开始计时，绝不重置）
+            # 倒计时播报（每30秒一次）
+            if state["initial_entry_time"]:
+                remain = TIME_STOP - int(time.time() - state["initial_entry_time"])
+                if remain > 0 and remain % 30 < 9:
+                    log(f"距离10分钟时间止损还剩 {remain} 秒（{remain//60}分{remain%60}秒）")
+
+            # 真实时间止损
             if state["initial_entry_time"] and time.time() - state["initial_entry_time"] > TIME_STOP:
-                log("触发10分钟时间止损 → 强平所有仓位")
-                await close_all_market()
-                state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
+                log("10分钟时间止损触发 → 强平所有仓位")
+                await close_all()
+                state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
                 await asyncio.sleep(15)
                 continue
 
-            # 只在 IDLE 状态开第一仓，彻底杜绝重复开仓
+            # 状态机
             if state["current_state"] == "IDLE":
-                if await open_order("BUY", SIZE_MAIN, price, "LONG"):
-                    state.update({
-                        "current_state": "LONG",
-                        "initial_entry_price": price,
-                        "initial_entry_time": time.time()
-                    })
-                    log(f"第一仓建立成功！C点 {price:.3f}")
+                if await open("BUY", SIZE_MAIN, price, "LONG"):
+                    state.update({"current_state":"LONG","initial_entry_price":price,"initial_entry_time":time.time()})
+                    log(f"第一仓建立！C点 {price:.3f}")
 
             elif state["current_state"] == "LONG":
                 C = state["initial_entry_price"]
                 if price >= C + FIXED_GRID:
-                    log("涨1美元 → 多单止盈")
-                    await close_all_market()
-                    state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
+                    log("涨1美元，止盈出局")
+                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
                 elif price <= C - FIXED_GRID:
-                    log("跌1美元 → 开空对冲")
-                    await open_order("SELL", SIZE_HEDGE1, price, "SHORT")
-                    state["current_state"] = "HEDGE1"
+                    await open("SELL", SIZE_HEDGE1, price, "SHORT")
+                    state["current_state"] = "HEDGE1"; log("跌1美元，开空对冲")
 
             elif state["current_state"] == "HEDGE1":
                 C = state["initial_entry_price"]
-                if price <= C - 2 * FIXED_GRID:
-                    log("跌2美元 → 空单止盈")
-                    await close_all_market()
-                    state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
+                if price <= C - 2*FIXED_GRID:
+                    log("跌2美元，空单止盈")
+                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
                 elif price >= C:
-                    log("回到C点 → 加多翻倍")
-                    await open_order("BUY", SIZE_HEDGE2, price, "LONG")
-                    state["current_state"] = "HEDGE2"
+                    await open("BUY", SIZE_HEDGE2, price, "LONG")
+                    state["current_state"] = "HEDGE2"; log("回到C点，加多翻倍")
 
             elif state["current_state"] == "HEDGE2":
-                C = state["initial_entry_price"]
-                if price >= C + FIXED_GRID:
-                    log("最终回升1美元 → 大胜出局！")
-                    await close_all_market()
-                    state.update({"current_state": "IDLE", "initial_entry_price": None, "initial_entry_time": None})
+                if price >= state["initial_entry_price"] + FIXED_GRID:
+                    log("最终回升1美元，大胜出局！")
+                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
 
-            # 心跳日志
-            elapsed = int(time.time() - (state["initial_entry_time"] or time.time()))
             dist = price - state["initial_entry_price"] if state["initial_entry_price"] else 0
-            log(f"状态:{state['current_state']:7} 价:{price:8.3f} 距C:{dist:+6.3f} 已运行:{elapsed}s")
+            elapsed = int(time.time() - (state["initial_entry_time"] or time.time()))
+            log(f"状态:{state['current_state']:7} 价:{price:8.3f} 距C:{dist:+6.3f} 运行:{elapsed}s")
 
         except Exception as e:
-            log(f"循环异常 → {e}")
-
+            log(f"异常 {e}")
         await asyncio.sleep(9)
 
 @app.on_event("startup")
-async def startup():
+async def go():
     asyncio.create_task(strategy_loop())
 
 @app.get("/")
-async def root():
-    try:
-        price = await get_last_price()
-    except:
-        price = 0
-    elapsed = int(time.time() - (state["initial_entry_time"] or time.time())) if state["initial_entry_time"] else 0
-    return {
-        "机器人": "SOL 1美元三角对冲",
-        "状态": state["current_state"],
-        "价格": round(price, 3),
-        "C点": round(state["initial_entry_price"], 3) if state["initial_entry_price"] else None,
-        "距C": round(price - (state["initial_entry_price"] or price), 3),
-        "距时间止损": max(0, TIME_STOP - elapsed)
-    }
+async def home():
+    try: p = await get_price()
+    except: p = 0
+    remain = max(0, TIME_STOP - int(time.time() - (state["initial_entry_time"] or time.time()))) if state["initial_entry_time"] else 0
+    return {"状态":state["current_state"], "价格":round(p,3), "C点":state["initial_entry_price"], "距时间止损":remain}
 
-log("终极稳定版加载完成，3秒后起飞…")
+log("2025 终极无敌版已就位，马上起飞……")
