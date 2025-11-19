@@ -1,30 +1,35 @@
 import os
+from fastapi import FastAPI
 from binance.um_futures import UMFutures
 
-def main():
+app = FastAPI(title="Binance USDC Balance Checker")
+
+@app.get("/")
+@app.get("/balance")
+async def get_usdc_balance():
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_SECRET")
 
     if not api_key or not api_secret:
-        print("❌ 未检测到环境变量，请检查 Render 是否配置 BINANCE_API_KEY / BINANCE_SECRET")
-        return
+        return {"error": "请在 Render 环境变量中配置 BINANCE_API_KEY 和 BINANCE_SECRET"}
 
     client = UMFutures(key=api_key, secret=api_secret)
 
     try:
-        balance_list = client.balance()
-        print("✅ 成功连接币安实盘！\n")
-
-        for item in balance_list:
+        balances = client.balance()
+        for item in balances:
             if item["asset"] == "USDC":
-                print("USDC 账户余额：", item["balance"])
-                print("USDC 可用余额：", item["availableBalance"])
-                return
-
-        print("⚠️ 没有找到 USDC，请确认资金在 U 本位合约账户")
-
+                return {
+                    "status": "success",
+                    "USDC 总余额": item["balance"],
+                    "USDC 可用余额": item["availableBalance"],
+                    "更新时间": item["updateTime"]
+                }
+        return {"status": "not_found", "message": "账户中未找到 USDC"}
+    
     except Exception as e:
-        print("❌ 连接币安失败：", e)
+        return {"status": "error", "message": str(e)}
 
-if __name__ == "__main__":
-    main()
+@app.get("/health")
+async def health():
+    return {"status": "running", "message": "Binance checker 已就
