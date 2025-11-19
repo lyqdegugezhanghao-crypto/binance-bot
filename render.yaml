@@ -1,9 +1,20 @@
 services:
   - type: web
     name: binance-test
-    env: python
-    plan: free
+    runtime: python
     region: singapore
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python main.py"
+    plan: free
     autoDeploy: true
+    
+    # 固定 Python 版本，防止 Render 升级默认版本导致挂掉
+    envVars:
+      PYTHON_VERSION: 3.11.9
+    
+    # 强烈建议加 --frozen-lockfile，速度更快更稳定
+    buildCommand: pip install -r requirements.txt --upgrade --no-cache-dir
+    
+    # 关键！99% 的 Python 项目用这行就完美启动
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2
+    
+    # 可选：如果你项目很大或者冷启动慢，可以加下面这行提速
+    # startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 2 --timeout-keep-alive 120
