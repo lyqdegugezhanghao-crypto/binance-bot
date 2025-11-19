@@ -1,22 +1,23 @@
 import os
 from fastapi import FastAPI
 
-# 官方 3.6.0 导入路径（已验证）
+# 官方 binance-connector 3.6.0 正确导入（GitHub 示例确认）
 try:
     from binance.um_futures import UMFutures
-    print("✅ Binance UM Futures imported successfully")
+    print("✅ Binance UM Futures imported successfully!")
 except ImportError as e:
-    print(f"❌ Import error: {e}")
-    UMFutures = None  # 备用
+    print(f"❌ Import failed: {e}")
+    # 备用：如果还是错，用动态导入
+    import importlib
+    binance_um = importlib.import_module('binance.um_futures')
+    UMFutures = binance_um.UMFutures
+    print("✅ Fallback import success!")
 
 app = FastAPI(title="Binance USDC Balance Checker")
 
 @app.get("/")
 @app.get("/balance")
 async def get_usdc_balance():
-    if UMFutures is None:
-        return {"error": "Binance 库导入失败，请检查 requirements.txt"}
-
     api_key = os.getenv("BINANCE_API_KEY")
     api_secret = os.getenv("BINANCE_SECRET")
 
