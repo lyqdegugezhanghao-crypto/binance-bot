@@ -1,158 +1,111 @@
-import os, asyncio, time
-from fastapi import FastAPI
-from binance.um_futures import UMFutures
-from datetime import datetime
+# -*- coding: utf-8 -*-
+from fmz import *
+task = VCtx(__name__)
 
-# ========================== 配置区 ==========================
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_SECRET")
+# ==================== 参数区（你只需要改这几行）===================
+grid_step          = 1.0            # 每档间隔（1美元）
+base_lots          = 0.32           # 首单手数
+martin_ratio       = 1.6            # 马丁倍数
+take_profit_usd    = 80             # 总盈利多少美元全平重启
+max_levels         = 5              # 最多只开5档（防止狂跌狂涨一直加）
+# =================================================================
 
-SYMBOL = "SOLUSDC"
-LEVERAGE = 3
-FIXED_GRID = 1.0
-TIME_STOP = 600
+done_levels = set()   # 记录已经开过的相对档位：'0'(C点), '+1'(B), '+2'(A), '-1'(D), '-2'(E)
 
-SIZE_MAIN, SIZE_HEDGE1, SIZE_HEDGE2 = 15, 30, 55
+def get_pos():
+    pos = exchange.GetPosition()
+    long = short = 0
+    for p in pos:
+        if p['Type'] in [PD_LONG, PD_LONG_YD]:
+            long += p['Amount']
+        elif p['Type'] in [PD_SHORT, PD_SHORT_YD]:
+            short += p['Amount']
+    return long, short
 
-app = FastAPI()
-client = UMFutures(key=API_KEY, secret=API_SECRET, base_url="https://fapi.binance.com")
+def close_all_and_reset():
+    global done_levels
+    pos = exchange.GetPosition()
+    if not pos: return
+    Log("【止盈触发】盈利 $", exchange.GetAccount().Profit, " 全平并重启")
+    for p in pos:
+        if p['Amount'] > 0:
+            if p['Type'] in [PD_LONG, PD_LONG_YD]:
+                exchange.SetDirection("closebuy"); exchange.Sell(-1, p['Amount'])
+            else:
+                exchange.SetDirection("closesell"); exchange.Buy(-1, p['Amount'])
+    Sleep(5000)
+    done_levels.clear()
+    Log("全平完成，动态网格已重置，等待新价格锚点")
 
-state = {"current_state":"IDLE", "initial_entry_price":None, "initial_entry_time":None}
-
-def log(m): print(f"[{datetime.now():%H:%M:%S}] {m}")
-
-async def get_price():
-    return float(client.mark_price(SYMBOL)["markPrice"])
-
-async def get_positions():
-    return client.get_position_risk(symbol=SYMBOL)
-
-def print_positions():
-    positions = client.get_position_risk(symbol=SYMBOL)
-    for p in positions:
-        amt = float(p["positionAmt"])
-        if abs(amt) > 0.001:
-            log(f"当前持仓 → {p['positionSide']} {amt:.2f} 手")
-
-async def open(side, usd, price, pos_side):
-    # 开仓前检查是否已持仓（防叠仓）
-    positions = client.get_position_risk(symbol=SYMBOL)
-    for p in positions:
-        if p["positionSide"] == pos_side and float(p["positionAmt"]) != 0:
-            log(f"警告：{pos_side} 已持仓 {float(p['positionAmt']):.2f}，跳过开仓")
-            return False
-
-    raw_qty = usd * LEVERAGE / price
-    qty = round(raw_qty // 0.01 * 0.01, 2)
-    if qty < 0.01: 
-        log("数量太小，放弃下单")
-        return False
-    try:
-        r = client.new_order(symbol=SYMBOL, side=side, type="MARKET", quantity=qty, positionSide=pos_side)
-        if r.get("orderId"):
-            log(f"开仓成功 → {pos_side} {side} {qty} 手")
-            return True
-    except Exception as e:
-        log(f"开仓失败 → {e}")
-    return False
-
-# 终极修复：用 get_position_risk + reduceOnly
-async def close_all():
-    log("开始强平：打印当前持仓")
-    print_positions()  # 平前打印
-
-    try:
-        positions = client.get_position_risk(symbol=SYMBOL)
-        for p in positions:
-            amt = float(p["positionAmt"])
-            if abs(amt) < 0.01: continue
-            side = "SELL" if amt > 0 else "BUY"
-            client.new_order(
-                symbol=SYMBOL,
-                side=side,
-                type="MARKET",
-                quantity=abs(amt),
-                positionSide=p["positionSide"],
-                reduceOnly=True  # 关键：只减仓，不开新仓！
-            )
-            log(f"反向平仓 → {p['positionSide']} {abs(amt):.2f} 手 (reduceOnly=True)")
-    except Exception as e:
-        log(f"强平异常 → {e}")
-
-    await asyncio.sleep(2)  # 等待平仓生效
-    log("强平完成：打印剩余持仓")
-    print_positions()  # 平后打印
-
-async def strategy_loop():
-    await asyncio.sleep(3)
-    try:
-        client.change_position_mode(dualSidePosition=True)
-        log("已确保双向持仓模式")
-    except: pass
+def main():
+    global done_levels
+    LogReset(1)                                   # 启动时清空旧日志
 
     while True:
-        try:
-            price = await get_price()
+        Sleep(3000)
 
-            # 倒计时
-            if state["initial_entry_time"]:
-                remain = TIME_STOP - int(time.time() - state["initial_entry_time"])
-                if remain > 0 and remain % 30 < 9:
-                    log(f"距离时间止损还剩 {remain} 秒")
+        # 1. 止盈全平重启
+        acc = exchange.GetAccount()
+        if acc and acc.Profit >= take_profit_usd:
+            close_all_and_reset()
+            continue
 
-            # 时间止损
-            if state["initial_entry_time"] and time.time() - state["initial_entry_time"] > TIME_STOP:
-                log("10分钟时间止损触发 → 执行强平")
-                await close_all()
-                state.update({"current_state":"IDLE", "initial_entry_price":None, "initial_entry_time":None})
-                await asyncio.sleep(18)
-                continue
+        long_qty, short_qty = get_pos()
+        ticker = exchange.GetTicker()
+        if not ticker: continue
+        price = ticker.Last
 
-            # 只在 IDLE 开第一仓 + 持仓检查
-            if state["current_state"] == "IDLE":
-                if await open("BUY", SIZE_MAIN, price, "LONG"):
-                    state.update({"current_state":"LONG", "initial_entry_price":price, "initial_entry_time":time.time()})
-                    log(f"第一仓建立 C点 {price:.3f}")
+        # 2. 手动全平也自动重置
+        if long_qty + short_qty == 0 and len(done_levels) > 0:
+            done_levels.clear()
+            Log("空仓检测 → 动态网格已重置")
 
-            elif state["current_state"] == "LONG":
-                C = state["initial_entry_price"]
-                if price >= C + FIXED_GRID:
-                    log("涨1美元 止盈")
-                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
-                elif price <= C - FIXED_GRID:
-                    await open("SELL", SIZE_HEDGE1, price, "SHORT")
-                    state["current_state"] = "HEDGE1"; log("跌1美元 开空对冲")
+        # 3. 动态计算当前五档价格（核心！）
+        C = price                                     # 当前价就是C点！
+        B = price + grid_step                         # 上方1美元
+        A = price + 2 * grid_step
+        D = price - grid_step                         # 下方1美元
+        E = price - 2 * grid_step
 
-            elif state["current_state"] == "HEDGE1":
-                C = state["initial_entry_price"]
-                if price <= C - 2*FIXED_GRID:
-                    log("跌2美元 空单止盈")
-                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
-                elif price >= C:
-                    await open("BUY", SIZE_HEDGE2, price, "LONG")
-                    state["current_state"] = "HEDGE2"; log("回到C点 加多翻倍")
+        # 4. 动态手数
+        lots = {
+            '+2': round(base_lots * martin_ratio**4, 2),  # A
+            '+1': round(base_lots * martin_ratio**3, 2),  # B
+            '0' : base_lots,                               # C
+            '-1': round(base_lots * martin_ratio**1, 2),  # D
+            '-2': round(base_lots * martin_ratio**2, 2),  # E
+        }
 
-            elif state["current_state"] == "HEDGE2":
-                if price >= state["initial_entry_price"] + FIXED_GRID:
-                    log("最终回升 大胜出局")
-                    await close_all(); state.update({"current_state":"IDLE","initial_entry_price":None,"initial_entry_time":None})
+        # 5. 状态栏显示
+        LogStatus(f"{_D()} | 现价(C):{price:.3f} 多:{long_qty} 空:{short_qty} 已开:{len(done_levels)}档 盈利:${acc.Profit:.1f}")
 
-            dist = price - state["initial_entry_price"] if state["initial_entry_price"] else 0
-            elapsed = int(time.time() - (state["initial_entry_time"] or time.time()))
-            log(f"状态:{state['current_state']:7} 价:{price:8.3f} 距C:{dist:+6.3f} 运行:{elapsed}s")
+        # 6. 核心开仓逻辑（任意点位立即生效）
+        # 首次建仓（C点）
+        if long_qty + short_qty == 0 and '0' not in done_levels:
+            exchange.SetDirection("buy")
+            exchange.Buy(-1, lots['0'])
+            done_levels.add('0')
+            Log(f"动态C点建仓 @ {price:.3f} 手数 {lots['0']}")
 
-        except Exception as e:
-            log(f"循环异常 {e}")
-        await asyncio.sleep(9)
+        # 只有多仓 → 可以加多或首次对冲空
+        elif long_qty > 0 and short_qty == 0:
+            if price >= B and '+1' not in done_levels:
+                exchange.SetDirection("buy"); exchange.Buy(-1, lots['+1']); done_levels.add('+1')
+            if price >= A and '+2' not in done_levels and len(done_levels) < max_levels:
+                exchange.SetDirection("buy"); exchange.Buy(-1, lots['+2']); done_levels.add('+2')
+            if price <= D and '-1' not in done_levels:
+                exchange.SetDirection("sell"); exchange.Sell(-1, lots['-1']); done_levels.add('-1')
 
-@app.on_event("startup")
-async def start():
-    asyncio.create_task(strategy_loop())
+        # 只有空仓 → 可以加空或对冲多
+        elif short_qty > 0 and long_qty == 0:
+            if price <= E and '-2' not in done_levels and len(done_levels) < max_levels:
+                exchange.SetDirection("sell"); exchange.Sell(-1, lots['-2']); done_levels.add('-2')
+            if price >= B and '+1' not inthe done_levels:
+                exchange.SetDirection("buy"); exchange.Buy(-1, lots['+1']); done_levels.add('+1')
 
-@app.get("/")
-async def root():
-    try: p = await get_price()
-    except: p = 0
-    return {"状态": state["current_state"], "价格": p, "C点": state["initial_entry_price"]}
-
-log("2025 终极防叠仓版已启动（get_position_risk + reduceOnly）")
+        # 双向持仓 → 只加最远两档
+        elif long_qty > 0 and short_qty > 0:
+            if price >= A and '+2' not in done_levels and len(done_levels) < max_levels:
+                exchange.SetDirection("buy"); exchange.Buy(-1, lots['+2']); done_levels.add('+2')
+            if price <= E and '-2' not in done_levels and len(done_levels) < max_levels:
+                exchange.SetDirection("sell"); exchange.Sell(-1, lots['-2']); done_levels.add('-2')
