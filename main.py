@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from binance.um_futures import UMFutures
 from datetime import datetime
 
+# ========================== 配置区 ==========================
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_SECRET")
 
@@ -23,10 +24,29 @@ def log(m): print(f"[{datetime.now():%H:%M:%S}] {m}")
 async def get_price():
     return float(client.mark_price(SYMBOL)["markPrice"])
 
+async def get_positions():
+    return client.futures_position_information(symbol=SYMBOL)
+
+def print_positions():
+    positions = client.futures_position_information(symbol=SYMBOL)
+    for p in positions:
+        amt = float(p["positionAmt"])
+        if abs(amt) > 0.001:
+            log(f"当前持仓 → {p['positionSide']} {amt:.2f} 手")
+
 async def open(side, usd, price, pos_side):
+    # 开仓前检查是否已持仓（防叠仓）
+    positions = await get_positions()
+    for p in positions:
+        if p["positionSide"] == pos_side and float(p["positionAmt"]) != 0:
+            log(f"警告：{pos_side} 已持仓 {float(p['positionAmt']):.2f}，跳过开仓")
+            return False
+
     raw_qty = usd * LEVERAGE / price
-    qty = round(raw_qty // 0.01 * 0.01, 2)  # SOLUSDC stepSize=0.01
-    if qty < 0.01: return False
+    qty = round(raw_qty // 0.01 * 0.01, 2)
+    if qty < 0.01: 
+        log("数量太小，放弃下单")
+        return False
     try:
         r = client.new_order(symbol=SYMBOL, side=side, type="MARKET", quantity=qty, positionSide=pos_side)
         if r.get("orderId"):
@@ -36,23 +56,32 @@ async def open(side, usd, price, pos_side):
         log(f"开仓失败 → {e}")
     return False
 
-# 终极核弹级强平（双保险）
+# 终极修复：用 reduceOnly + 手动反向平仓
 async def close_all():
+    log("开始强平：打印当前持仓")
+    print_positions()  # 平前打印
+
     try:
-        # 方法1：最稳定的API
-        positions = client.get_position_risk(symbol=SYMBOL)
+        positions = client.futures_position_information(symbol=SYMBOL)
         for p in positions:
             amt = float(p["positionAmt"])
             if abs(amt) < 0.01: continue
             side = "SELL" if amt > 0 else "BUY"
-            client.new_order(symbol=SYMBOL, side=side, type="MARKET", quantity=abs(amt), positionSide=p["positionSide"])
-            log(f"强平成功 → {p['positionSide']} {abs(amt):.2f} 手（get_position_risk）")
-
-        # 方法2：核弹级一键全平（永不漏平）
-        client.futures_account_close_all_positions(symbol=SYMBOL, closeType="LIQUIDATION")
-        log("执行核弹级全平（close_all_positions）")
+            client.new_order(
+                symbol=SYMBOL,
+                side=side,
+                type="MARKET",
+                quantity=abs(amt),
+                positionSide=p["positionSide"],
+                reduceOnly=True  # 关键：只减仓，不开新仓！
+            )
+            log(f"反向平仓 → {p['positionSide']} {abs(amt):.2f} 手 (reduceOnly=True)")
     except Exception as e:
         log(f"强平异常 → {e}")
+
+    await asyncio.sleep(2)  # 等待平仓生效
+    log("强平完成：打印剩余持仓")
+    print_positions()  # 平后打印
 
 async def strategy_loop():
     await asyncio.sleep(3)
@@ -73,19 +102,18 @@ async def strategy_loop():
 
             # 时间止损
             if state["initial_entry_time"] and time.time() - state["initial_entry_time"] > TIME_STOP:
-                log("10分钟时间止损触发 → 执行核弹级强平")
+                log("10分钟时间止损触发 → 执行强平")
                 await close_all()
                 state.update({"current_state":"IDLE", "initial_entry_price":None, "initial_entry_time":None})
                 await asyncio.sleep(18)
                 continue
 
-            # 只在 IDLE 开第一仓
+            # 只在 IDLE 开第一仓 + 持仓检查
             if state["current_state"] == "IDLE":
                 if await open("BUY", SIZE_MAIN, price, "LONG"):
                     state.update({"current_state":"LONG", "initial_entry_price":price, "initial_entry_time":time.time()})
                     log(f"第一仓建立 C点 {price:.3f}")
 
-            # 其他状态逻辑保持不变
             elif state["current_state"] == "LONG":
                 C = state["initial_entry_price"]
                 if price >= C + FIXED_GRID:
@@ -127,4 +155,4 @@ async def root():
     except: p = 0
     return {"状态": state["current_state"], "价格": p, "C点": state["initial_entry_price"]}
 
-log("2025 核弹级永不叠仓版已启动")
+log("2025 终极防叠仓版已启动（reduceOnly + 持仓验证）")
